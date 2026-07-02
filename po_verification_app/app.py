@@ -10,7 +10,7 @@ import streamlit as st
 
 from po_checker.system_parser import load_system_rows
 from po_checker.po_parser import parse_po_workbook
-from po_checker.matcher import match_po, compute_checks, decode_reason, po_sys_values, FIELDS
+from po_checker.matcher import match_po, compute_checks, po_sys_values, FIELDS
 from po_checker.export import build_excel_report
 
 st.set_page_config(page_title="PO vs System Verification", layout="wide")
@@ -31,21 +31,23 @@ def _parse_po_cached(file_bytes: bytes, filename: str):
 
 
 def build_display_dataframe(po_data: dict, results: list) -> pd.DataFrame:
-    """Buduje DataFrame w takim samym układzie kolumn jak tabela w wersji HTML."""
+    """Buduje DataFrame w takim samym układzie kolumn jak eksportowany plik Excel."""
     rows = []
     for rec in results:
         vals = po_sys_values(rec)
         checks = compute_checks(rec) if rec['sys_found'] else None
         row = {}
         for f in FIELDS:
-            po_v, sys_v = vals[f]
-            row[f'{f} (PO)'] = po_v
-            row[f'{f} (Sys)'] = sys_v
-            row[f'{f} Match'] = checks[f] if checks else ''
-        reason_interp = decode_reason(rec.get('sys_reason', ''), po_data['target_month']) if rec['sys_found'] else ''
+            row[f'{f} (PO)'] = vals[f][0]
+        for f in FIELDS:
+            if f == 'PID':
+                continue
+            label = 'Color Desc 1st3 (Sys)' if f == 'Color Desc' else f'{f} (Sys)'
+            row[label] = vals[f][1] if rec['sys_found'] else ''
         row['Cancel Date (Sys)'] = rec.get('cancel_dates', '') if rec['sys_found'] else ''
         row['Reason (Sys)'] = rec.get('sys_reason', '') if rec['sys_found'] else ''
-        row['Reason Interpreted'] = reason_interp
+        for f in FIELDS:
+            row[f'{f} Match'] = checks[f] if checks else ''
         row['Notes'] = rec.get('note') or ('' if rec['sys_found'] else 'No matching system line found')
         rows.append(row)
     return pd.DataFrame(rows)
@@ -70,9 +72,8 @@ def style_dataframe(df: pd.DataFrame):
     styler = df.style
     for col in match_cols:
         styler = styler.map(color_match, subset=[col])
-    for col in ['Reason Interpreted', 'Notes']:
-        if col in df.columns:
-            styler = styler.map(color_note, subset=[col])
+    if 'Notes' in df.columns:
+        styler = styler.map(color_note, subset=['Notes'])
     return styler
 
 
@@ -94,19 +95,31 @@ with st.container(border=True):
         except Exception as e:
             st.error(f"Błąd wczytywania pliku systemowego: {e}")
 
+ACCOUNT_OPTIONS = {"Store (M075M)": "M075M", ".com (M094M)": "M094M"}
+
 with st.container(border=True):
     st.markdown("**Krok 2 — pliki PO**")
     po_files = st.file_uploader(
         "Wgraj jeden lub więcej plików PO (.xlsx)", type=["xlsx"], accept_multiple_files=True, key="po_files"
     )
+
+    account_choices = {}
+    if po_files:
+        st.caption("Dla każdego pliku wybierz, na jakie konto został złożony (system tego nie zapisuje w pliku PO):")
+        for idx, f in enumerate(po_files):
+            account_choices[idx] = st.selectbox(
+                f.name, options=list(ACCOUNT_OPTIONS.keys()), key=f"account_{idx}_{f.name}"
+            )
+
     run = st.button("Uruchom weryfikację", disabled=not (system_rows and po_files))
 
 if run and system_rows and po_files:
-    for f in po_files:
+    for idx, f in enumerate(po_files):
         st.divider()
         try:
+            account_code = ACCOUNT_OPTIONS[account_choices[idx]]
             po_data = _parse_po_cached(f.getvalue(), f.name)
-            results = match_po(po_data, system_rows)
+            results = match_po(po_data, system_rows, account_code)
             mismatch_count = sum(
                 1 for r in results
                 if not r['sys_found'] or 'MISMATCH' in compute_checks(r).values()
@@ -116,7 +129,7 @@ if run and system_rows and po_files:
             col1, col2 = st.columns([3, 1])
             with col1:
                 st.subheader(f"PO {po_data['po_number']}")
-                st.caption(f"{len(results)} linii · konto {po_data['account']} · {badge}")
+                st.caption(f"{len(results)} linii · konto {account_choices[idx]} · {badge}")
             with col2:
                 report = build_excel_report(po_data, results)
                 st.download_button(
