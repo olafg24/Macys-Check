@@ -18,11 +18,6 @@ from openpyxl import load_workbook
 from .models import PORecord
 from .helpers import js_number, is_truthy_number, round4
 
-MONTHS = {
-    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
-    'jul': 7, 'aug': 8, 'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dec': 12,
-}
-
 
 def cell_val(ws, r: int, c: int):
     """Wartość komórki, r i c 0-indeksowane."""
@@ -46,38 +41,36 @@ def find_header_rows(ws, max_row: int) -> Optional[Tuple[int, int]]:
     return None
 
 
-def parse_filename_meta(filename: str) -> dict:
-    """Wyciąga numer PO, konto i docelowy miesiąc z nazwy pliku.
+def find_po_number_in_content(ws, max_scan_rows: int = 20) -> Optional[str]:
+    """Szuka numeru PO wewnątrz pliku, np. w linijce 'PO #: 7588488   Dept: 451...'.
 
-    Oczekiwany wzorzec nazwy: '..._Miesiąc_COM/HAF/STORE.xlsx', np.
-    'PO_12345_July_COM.xlsx'. Jeśli Twoje pliki mają inny format nazw,
-    zmień wyrażenia regularne poniżej.
+    To jest dużo pewniejsze niż wyciąganie numeru z nazwy pliku, bo ta linijka
+    jest generowana automatycznie przez system źródłowy (FedBuy) i nie zależy
+    od tego, jak ktoś zapisał/pobrał plik.
     """
-    base = re.sub(r'\.xlsx$', '', filename, flags=re.IGNORECASE)
-    m = re.search(r'[ _]([A-Za-z]+)[ _](COM|HAF|STORE|ST)$', base, re.IGNORECASE)
-    if not m:
-        raise ValueError('Nazwa pliku nie pasuje do oczekiwanego wzorca (..._Miesiac_COM/HAF/STORE.xlsx)')
+    for r in range(0, max_scan_rows):
+        val = cell_val(ws, r, 0)
+        if val is None:
+            continue
+        m = re.search(r'PO\s*#:?\s*(\d+)', str(val), re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return None
 
-    month_token = m.group(1).lower()
-    type_token = m.group(2).upper()
-    account = 'M075M' if type_token in ('STORE', 'ST') else 'M094M'
 
-    month_num = MONTHS.get(month_token) or MONTHS.get(month_token[:3])
-    if not month_num:
-        raise ValueError(f'Nie udało się rozpoznać miesiąca z fragmentu nazwy pliku: {month_token}')
-
-    target_month = month_num - 1
-    if target_month < 1:
-        target_month = 12
-
-    po_match = re.search(r'PO[ _](\d+)', base, re.IGNORECASE)
-    po_number = po_match.group(1) if po_match else base
-
-    return {'account': account, 'target_month': target_month, 'po_number': po_number}
+def guess_po_number_from_filename(filename: str) -> Optional[str]:
+    """Ostatnia deska ratunku, gdyby numeru PO nie dało się znaleźć w treści pliku."""
+    m = re.search(r'PO[ _#]*(\d+)', filename, re.IGNORECASE)
+    return m.group(1) if m else None
 
 
 def parse_po_workbook(file_bytes: bytes, filename: str) -> dict:
-    """Parsuje plik PO i zwraca słownik z metadanymi + listą PORecord."""
+    """Parsuje plik PO i zwraca słownik z metadanymi + listą PORecord.
+
+    Konto (Store / .com) NIE jest wyciągane z tego pliku - system źródłowy
+    (FedBuy) go tam nie zapisuje, więc użytkownik podaje je ręcznie w
+    interfejsie aplikacji.
+    """
     wb = load_workbook(BytesIO(file_bytes), data_only=True)
     ws = wb[wb.sheetnames[0]]
     max_row = ws.max_row - 1
@@ -151,8 +144,8 @@ def parse_po_workbook(file_bytes: bytes, filename: str) -> dict:
                 records.append(PORecord(
                     pid=pid,
                     pid6=pid[:6],
-                    nrf_color=str(c),
-                    color_desc=str(d) if d else '',
+                    nrf_color=str(c).strip(),
+                    color_desc=str(d).strip() if d else '',
                     pack_ratio=pack_ratio,
                     entered_qty=o,
                     ext_cost=v,
@@ -166,11 +159,14 @@ def parse_po_workbook(file_bytes: bytes, filename: str) -> dict:
         else:
             i += 1
 
-    meta = parse_filename_meta(filename)
+    po_number = find_po_number_in_content(ws) or guess_po_number_from_filename(filename)
+    if not po_number:
+        raise ValueError(
+            'Nie udało się ustalić numeru PO ani z treści pliku, ani z nazwy pliku.'
+        )
+
     return {
         'filename': filename,
-        'po_number': meta['po_number'],
-        'account': meta['account'],
-        'target_month': meta['target_month'],
+        'po_number': po_number,
         'records': records,
     }
