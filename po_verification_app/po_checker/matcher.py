@@ -27,26 +27,49 @@ def norm_pack(s: str) -> str:
     return '-'.join(str(int(p)) for p in s.split('-'))
 
 
-def match_po(po_data: dict, sys_rows: List[SystemRow], account: str) -> List[dict]:
+def match_po(po_data: dict, sys_rows: List[SystemRow]) -> List[dict]:
     """Dla każdej linii z PO znajduje odpowiadające wiersze systemowe i je sumuje.
 
-    Dopasowanie idzie po (styl, kolor NRF, konto). Jeśli dla tej kombinacji
-    istnieje w systemie kilka wierszy (np. kilka fal/dat anulowania), wszystkie
-    zostają zsumowane - nie ma już filtrowania po konkretnym miesiącu.
+    Dopasowanie idzie po (styl, kolor NRF) - BEZ filtrowania po koncie, bo
+    użytkownik nie zawsze wie/pamięta, czy dane PO jest na Store czy .com.
+    Jeśli pasujące wiersze systemowe należą tylko do jednego konta, zostaje
+    ono użyte automatycznie. Jeśli występują oba konta, wybierane jest to,
+    którego suma ilości jest bliższa ilości z PO - a w Notes pojawia się
+    informacja, że wybór był niejednoznaczny, żeby dało się to zweryfikować
+    ręcznie w razie wątpliwości.
     """
     results = []
 
     for rec in po_data['records']:
-        candidates = [
+        candidates_all = [
             sr for sr in sys_rows
-            if sr.style == rec.pid6 and sr.nrf_color == rec.nrf_color and sr.account == account
+            if sr.style == rec.pid6 and sr.nrf_color == rec.nrf_color
         ]
-        if not candidates:
+        if not candidates_all:
             results.append({**rec.as_dict(), 'sys_found': False, 'note': 'No matching system line found'})
             continue
 
-        used = candidates
+        accounts_present = sorted(set(sr.account for sr in candidates_all))
         notes = []
+
+        if len(accounts_present) == 1:
+            used = candidates_all
+        else:
+            # Kilka kont pasuje do tego stylu/koloru - wybieramy to, ktorego
+            # suma ilosci jest najblizsza ilosci zamowionej w PO.
+            groups = {
+                acct: [sr for sr in candidates_all if sr.account == acct]
+                for acct in accounts_present
+            }
+            sums = {acct: sum((sr.order_qty or 0) for sr in g) for acct, g in groups.items()}
+            best_acct = min(sums, key=lambda a: abs(sums[a] - (rec.entered_qty or 0)))
+            used = groups[best_acct]
+            other_summary = ', '.join(f'{a}={sums[a]:g}' for a in accounts_present)
+            notes.append(
+                f'Multiple accounts matched ({other_summary}); auto-selected {best_acct} '
+                f'based on closest quantity match to PO ({rec.entered_qty:g})'
+            )
+
         if len(used) > 1:
             notes.append(f'{len(used)} system lines aggregated (summed)')
 
@@ -59,6 +82,7 @@ def match_po(po_data: dict, sys_rows: List[SystemRow], account: str) -> List[dic
         results.append({
             **rec.as_dict(),
             'sys_found': True,
+            'sys_account': used[0].account,
             'sys_color_desc3': used[0].color,
             'sys_pack_ratio': norm_pack(used[0].pack_ratio),
             'sys_entered_qty': sys_qty,
