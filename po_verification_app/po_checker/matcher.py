@@ -10,9 +10,14 @@ FIELDS = [
     'Ext Cost $', 'Ext Owned $', 'OWN MU%', 'Price', 'MSRP',
 ]
 
-HEADERS = [f'{f} ({src})' for f in FIELDS for src in ('PO', 'Sys', 'Match')] + [
-    'Cancel Date (Sys)', 'Reason (Sys)', 'Reason Interpreted', 'Notes',
-]
+HEADERS = (
+    [f'{f} (PO)' for f in FIELDS]
+    + ['NRF Color (Sys)', 'Color Desc 1st3 (Sys)', 'Pack Ratio (Sys)', 'Entered Qty (Sys)',
+       'Ext Cost $ (Sys)', 'Ext Owned $ (Sys)', 'OWN MU% (Sys)', 'Price (Sys)', 'MSRP (Sys)']
+    + ['Cancel Date (Sys)', 'Reason (Sys)']
+    + [f'{f} Match' for f in FIELDS]
+    + ['Notes']
+)
 
 
 def norm_pack(s: str) -> str:
@@ -22,10 +27,13 @@ def norm_pack(s: str) -> str:
     return '-'.join(str(int(p)) for p in s.split('-'))
 
 
-def match_po(po_data: dict, sys_rows: List[SystemRow]) -> List[dict]:
-    """Dla każdej linii z PO znajduje odpowiadające wiersze systemowe i je sumuje."""
-    account = po_data['account']
-    target_month = po_data['target_month']
+def match_po(po_data: dict, sys_rows: List[SystemRow], account: str) -> List[dict]:
+    """Dla każdej linii z PO znajduje odpowiadające wiersze systemowe i je sumuje.
+
+    Dopasowanie idzie po (styl, kolor NRF, konto). Jeśli dla tej kombinacji
+    istnieje w systemie kilka wierszy (np. kilka fal/dat anulowania), wszystkie
+    zostają zsumowane - nie ma już filtrowania po konkretnym miesiącu.
+    """
     results = []
 
     for rec in po_data['records']:
@@ -37,13 +45,8 @@ def match_po(po_data: dict, sys_rows: List[SystemRow]) -> List[dict]:
             results.append({**rec.as_dict(), 'sys_found': False, 'note': 'No matching system line found'})
             continue
 
-        in_month = [sr for sr in candidates if sr.cancel_month == target_month]
-        used = in_month if in_month else candidates
-
+        used = candidates
         notes = []
-        if not in_month:
-            dates = sorted(set(c.cancel_date_str for c in candidates))
-            notes.append('No line with Cancel Date in target month; using available date(s): ' + ', '.join(dates))
         if len(used) > 1:
             notes.append(f'{len(used)} system lines aggregated (summed)')
 
