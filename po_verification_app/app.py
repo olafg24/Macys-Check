@@ -95,41 +95,39 @@ with st.container(border=True):
         except Exception as e:
             st.error(f"Błąd wczytywania pliku systemowego: {e}")
 
-ACCOUNT_OPTIONS = {"Store (M075M)": "M075M", ".com (M094M)": "M094M"}
-
 with st.container(border=True):
     st.markdown("**Krok 2 — pliki PO**")
     po_files = st.file_uploader(
         "Wgraj jeden lub więcej plików PO (.xlsx)", type=["xlsx"], accept_multiple_files=True, key="po_files"
     )
-
-    account_choices = {}
-    if po_files:
-        st.caption("Dla każdego pliku wybierz, na jakie konto został złożony (system tego nie zapisuje w pliku PO):")
-        for idx, f in enumerate(po_files):
-            account_choices[idx] = st.selectbox(
-                f.name, options=list(ACCOUNT_OPTIONS.keys()), key=f"account_{idx}_{f.name}"
-            )
+    st.caption("Konto (Store / .com) jest wykrywane automatycznie na podstawie dopasowania w systemie.")
 
     run = st.button("Uruchom weryfikację", disabled=not (system_rows and po_files))
 
 if run and system_rows and po_files:
-    for idx, f in enumerate(po_files):
+    for f in po_files:
         st.divider()
         try:
-            account_code = ACCOUNT_OPTIONS[account_choices[idx]]
             po_data = _parse_po_cached(f.getvalue(), f.name)
-            results = match_po(po_data, system_rows, account_code)
+            results = match_po(po_data, system_rows)
             mismatch_count = sum(
                 1 for r in results
                 if not r['sys_found'] or 'MISMATCH' in compute_checks(r).values()
             )
+            accounts_used = sorted(set(r['sys_account'] for r in results if r.get('sys_found')))
+            ambiguous_count = sum(1 for r in results if 'Multiple accounts matched' in (r.get('note') or ''))
 
             badge = f":red[{mismatch_count} linia/linie do sprawdzenia]" if mismatch_count else ":green[Wszystko się zgadza]"
             col1, col2 = st.columns([3, 1])
             with col1:
                 st.subheader(f"PO {po_data['po_number']}")
-                st.caption(f"{len(results)} linii · konto {account_choices[idx]} · {badge}")
+                accounts_label = ', '.join(accounts_used) if accounts_used else '—'
+                st.caption(f"{len(results)} linii · wykryte konto(a): {accounts_label} · {badge}")
+                if ambiguous_count:
+                    st.warning(
+                        f"{ambiguous_count} linia/linie miały dopasowanie do obu kont naraz — "
+                        "wybór był automatyczny na podstawie zgodności ilości. Sprawdź kolumnę Notes."
+                    )
             with col2:
                 report = build_excel_report(po_data, results)
                 st.download_button(
